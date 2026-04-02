@@ -1,10 +1,23 @@
 package store
-import("database/sql";"fmt";"os";"path/filepath";"time";_ "modernc.org/sqlite")
-type DB struct{*sql.DB}
-type Metric struct{ID int64 `json:"id"`;Name string `json:"name"`;Labels string `json:"labels"`;Type string `json:"type"`;Value float64 `json:"value"`;RecordedAt time.Time `json:"recorded_at"`}
-func Open(d string)(*DB,error){os.MkdirAll(d,0755);dsn:=filepath.Join(d,"metrics.db")+"?_journal_mode=WAL&_busy_timeout=5000";db,err:=sql.Open("sqlite",dsn);if err!=nil{return nil,fmt.Errorf("open: %w",err)};db.SetMaxOpenConns(1);migrate(db);return &DB{db},nil}
-func migrate(db *sql.DB){db.Exec(`CREATE TABLE IF NOT EXISTS metrics(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,labels TEXT DEFAULT '',type TEXT DEFAULT 'gauge',value REAL NOT NULL,recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP)`)}
-func(db *DB)Record(m *Metric)error{res,err:=db.Exec(`INSERT INTO metrics(name,labels,type,value)VALUES(?,?,?,?)`,m.Name,m.Labels,m.Type,m.Value);if err!=nil{return err};m.ID,_=res.LastInsertId();return nil}
-func(db *DB)Latest()([]map[string]interface{},error){rows,err:=db.Query(`SELECT name,labels,type,value,recorded_at FROM(SELECT name,labels,type,value,recorded_at,ROW_NUMBER()OVER(PARTITION BY name ORDER BY recorded_at DESC)rn FROM metrics)WHERE rn=1 ORDER BY name`);if err!=nil{return nil,err};defer rows.Close();var out[]map[string]interface{};for rows.Next(){var name,labels,typ string;var val float64;var ts time.Time;rows.Scan(&name,&labels,&typ,&val,&ts);out=append(out,map[string]interface{}{"name":name,"labels":labels,"type":typ,"value":val,"recorded_at":ts})};return out,nil}
-func(db *DB)History(name string)([]Metric,error){rows,_:=db.Query(`SELECT id,name,labels,type,value,recorded_at FROM metrics WHERE name=? ORDER BY recorded_at DESC LIMIT 200`,name);defer rows.Close();var out[]Metric;for rows.Next(){var m Metric;rows.Scan(&m.ID,&m.Name,&m.Labels,&m.Type,&m.Value,&m.RecordedAt);out=append(out,m)};return out,nil}
-func(db *DB)Stats()(map[string]interface{},error){var names,total int;db.QueryRow(`SELECT COUNT(DISTINCT name) FROM metrics`).Scan(&names);db.QueryRow(`SELECT COUNT(*) FROM metrics`).Scan(&total);return map[string]interface{}{"metric_names":names,"total_points":total},nil}
+import ("database/sql";"fmt";"os";"path/filepath";"time";_ "modernc.org/sqlite")
+type DB struct{db *sql.DB}
+type Metric struct{
+	ID string `json:"id"`
+	Name string `json:"name"`
+	Value float64 `json:"value"`
+	Unit string `json:"unit"`
+	Source string `json:"source"`
+	Tags string `json:"tags"`
+	CreatedAt string `json:"created_at"`
+}
+func Open(d string)(*DB,error){if err:=os.MkdirAll(d,0755);err!=nil{return nil,err};db,err:=sql.Open("sqlite",filepath.Join(d,"metrics.db")+"?_journal_mode=WAL&_busy_timeout=5000");if err!=nil{return nil,err}
+db.Exec(`CREATE TABLE IF NOT EXISTS metrics(id TEXT PRIMARY KEY,name TEXT NOT NULL,value REAL DEFAULT 0,unit TEXT DEFAULT '',source TEXT DEFAULT '',tags TEXT DEFAULT '',created_at TEXT DEFAULT(datetime('now')))`)
+return &DB{db:db},nil}
+func(d *DB)Close()error{return d.db.Close()}
+func genID()string{return fmt.Sprintf("%d",time.Now().UnixNano())}
+func now()string{return time.Now().UTC().Format(time.RFC3339)}
+func(d *DB)Create(e *Metric)error{e.ID=genID();e.CreatedAt=now();_,err:=d.db.Exec(`INSERT INTO metrics(id,name,value,unit,source,tags,created_at)VALUES(?,?,?,?,?,?,?)`,e.ID,e.Name,e.Value,e.Unit,e.Source,e.Tags,e.CreatedAt);return err}
+func(d *DB)Get(id string)*Metric{var e Metric;if d.db.QueryRow(`SELECT id,name,value,unit,source,tags,created_at FROM metrics WHERE id=?`,id).Scan(&e.ID,&e.Name,&e.Value,&e.Unit,&e.Source,&e.Tags,&e.CreatedAt)!=nil{return nil};return &e}
+func(d *DB)List()[]Metric{rows,_:=d.db.Query(`SELECT id,name,value,unit,source,tags,created_at FROM metrics ORDER BY created_at DESC`);if rows==nil{return nil};defer rows.Close();var o []Metric;for rows.Next(){var e Metric;rows.Scan(&e.ID,&e.Name,&e.Value,&e.Unit,&e.Source,&e.Tags,&e.CreatedAt);o=append(o,e)};return o}
+func(d *DB)Delete(id string)error{_,err:=d.db.Exec(`DELETE FROM metrics WHERE id=?`,id);return err}
+func(d *DB)Count()int{var n int;d.db.QueryRow(`SELECT COUNT(*) FROM metrics`).Scan(&n);return n}
